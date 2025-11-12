@@ -1,0 +1,814 @@
+---
+title: Modelling Variable Arrival Rates
+author:
+  - name: Sammi Rosser
+    orcid: 0000-0002-9552-8988
+    url: https://github.com/Bergam0t
+  - name: Dan Chalk
+    orcid: 0000-0002-4165-4364
+    url: https://github.com/hsma-chief-elf
+execute:
+  eval: false
+jupyter: python3
+---
+
+It is often the case that arrivals to a system do not occur completely regularly throughout the day.
+
+For example, in an emergency department, we may find that the number of arrivals climb in the afternoon and early evening before dropping off again overnight.
+
+One way to implement this is to return to the `sim-tools` package by [Tom Monks](https://orcid.org/0000-0003-2631-4481), which we used in (@sec-distributions): Choosing Distributions and @sec-reproducibility: Reproducibility. We will use a class that creates a non-stationary poisson process via thinning.
+
+## The principle used
+
+The `sim-tools` documentation states the following about the approach we will be using:
+
+> Thinning is an acceptance-rejection approach to sampling inter-arrival times (IAT) from a time dependent distribution where each time period follows its own exponential distribution.
+
+```{python}
+#| eval: true
+#| echo: false
+
+from sim_tools.time_dependent import NSPPThinning
+import plotly.express as px
+```
+
+The NSPP thinning class takes in a dataframe with two columns:
+
+- The first, called 't', is a list of time points at which the arrival rate changes.
+- The second, called 'arrival_rate', is the arrival rate in the form of the average inter-arrival time in time units.
+
+Let's look at an example of the sort of dataframe we would create and pass in.
+
+```{python}
+#| eval: true
+#| echo: false
+
+import pandas as pd
+nspp_df_example = pd.read_csv("resources/nspp_example_1.csv")
+nspp_df_example
+```
+
+Let's add a few more columns so we can better understand what's going on.
+
+```{python}
+#| eval: true
+#| echo: false
+
+from datetime import datetime, timedelta
+
+time_object = datetime(2021, 1, 1, 0, 0, 0)
+
+nspp_df_example['time_minutes'] = nspp_df_example['t'].apply(lambda x: (time_object + timedelta(minutes=x)).strftime("%H:%M:%S") )
+
+nspp_df_example['arrival_rate'] = nspp_df_example['mean_iat'].apply(lambda x: f"1/{x}")
+
+nspp_df_example['arrivals_per_hour'] = nspp_df_example['mean_iat'].apply(lambda x: round(60/x,1))
+
+nspp_df_example[['t', 'time_minutes', 'mean_iat', 'arrival_rate', 'arrivals_per_hour']]
+```
+
+Let's visualise this in a graph.
+
+```{python}
+#| eval: true
+#| echo: false
+
+px.line(nspp_df_example, x='time_minutes', y='arrivals_per_hour', title="Average Arrivals per Hour to Simulated Emergency Department")
+```
+
+:::{.callout-tip}
+The key things to note here are
+
+- A higher inter-arrival time means there are fewer arrivals per hour
+- We store the time as a number of simulation units. Here we are interpreting this as the number of minutes, but we could correspond this instead to days, which we will do in a later example.
+:::
+
+
+:::{.callout-note collapse="true"}
+### Click here for a more in-depth breakdown about how the NSPPThinning class works under the hood
+
+The NSPP thinning class uses this table to do a few things:
+
+- Set up an exponential distribution using the **highest** observed arrival rate.
+- Work out the time interval between our dataframe rows.
+
+Let's first look at 20,000 samples taken from the exponential distribution that is set up using the maximum arrival rate (1 divided by the lowest inter-arrival time).
+
+```{python}
+#| eval: true
+#| echo: false
+import numpy as np
+
+nspp_df_example['arrival_rate'] = nspp_df_example['mean_iat'].apply(lambda x: 1/x)
+lambda_max = nspp_df_example["arrival_rate"].max()
+arr_rng = np.random.default_rng(42)
+
+samples_original = arr_rng.exponential(1 / lambda_max, size=20000)
+
+px.histogram(samples_original)
+```
+
+Now let's take a look at the distribution that is generated when the code thinks the simulation time is 480.
+
+```{python}
+#| eval: true
+#| echo: false
+
+simulation_time=480
+interval = int(nspp_df_example.iloc[1]["t"] - nspp_df_example.iloc[0]["t"])
+
+t = int(simulation_time // interval) % len(nspp_df_example)
+
+print(f"The index of the row to return from the dataframe - is {t}")
+
+lambda_t = nspp_df_example["arrival_rate"].iloc[t]
+
+print(f"The value of lambda at this time is {lambda_t}")
+```
+
+```{python}
+#| eval: true
+#| echo: false
+class_example = NSPPThinning(data=nspp_df_example, random_seed1=42, random_seed2=88)
+
+samples_thinned = [class_example.sample(simulation_time=480) for i in range(20000)]
+
+samples_comparison_df = pd.DataFrame(dict(
+    series = np.concatenate((["lambda_max"]*len(samples_original), ["thinned"]*len(samples_thinned))),
+    data = np.concatenate((samples_original,samples_thinned))
+))
+
+
+px.histogram(samples_comparison_df, x="data", color="series", barmode="overlay")
+```
+
+Let's repeat this for all the different time periods in our dataset.
+
+```{python}
+#| eval: true
+#| echo: false
+dfs = []
+
+for simulation_time in nspp_df_example.t.values:
+    samples_thinned = [class_example.sample(simulation_time=simulation_time) for i in range(20000)]
+
+    samples_comparison_df = pd.DataFrame(dict(
+        series = np.concatenate((["lambda_max"]*len(samples_original), ["thinned"]*len(samples_thinned))),
+        data = np.concatenate((samples_original,samples_thinned)),
+        simulation_time = simulation_time
+    ))
+
+    dfs.append(samples_comparison_df)
+
+
+px.histogram(pd.concat(dfs), x="data", color="series", barmode="overlay", facet_col="simulation_time", facet_col_wrap=4, height=1200, opacity=0.4, facet_row_spacing=0.03, facet_col_spacing=0.02)
+
+```
+
+The wider distributions - where more of the blue 'unthinned' distribution is still visible - indicate that the sampled inter-arrival time is likely to be longer.
+
+:::
+
+## Coding the model
+
+:::{.callout-tip}
+Throughout the code, anything new that's been added will be followed by the comment `##NEW` - so look out for that in the following code chunks.
+:::
+
+### Imports
+
+In addition to our existing imports, we need to import the `NSPPThinning` class from the `time_dependent` module as follows.
+
+```{python}
+from sim_tools.time_dependent import NSPPThinning
+```
+
+### g class
+
+We need to add a new dataframe to our g class.
+
+This will be used by the NSPPThinning class to determine the arrival rate depending on the current simulation time.
+
+Note that the dataframe we have loaded in only contains a column for the mean interarrival time. We need to convert this to a rate by dividing 1 by the mean interarrival time.
+
+:::{.callout-tip}
+The two essential columns to have in our new `arrivals_time_dependent_df` are:
+
+- `t`
+- `arrival_rate`
+
+`t` is an integer representing the simulation time at which the rate applies from.
+
+`arrival_rate` is an indication of the arrivals per time unit (1 over the average interarrival time).
+:::
+
+We will also remove our `patient_inter` attribute as that's no longer going to be in use.
+
+```{python}
+arrivals_df = pd.read_csv("resources/nspp_example_1.csv")
+arrivals_df["arrival_rate"] = arrivals_df['mean_iat'].apply(lambda x: 1/x)
+
+class g:
+    arrivals_time_dependent_df = arrivals_df  ##NEW
+    mean_n_consult_time = 6
+    number_of_nurses = 1
+    sim_duration = 120
+    number_of_runs = 5
+
+```
+
+### Patient class
+
+Let's add an attribute to our patient class so we can track their arrival time.
+
+```{python}
+# Class representing patients coming in to the clinic.  Here, patients have
+# two attributes that they carry with them - their ID, and the amount of time
+# they spent queuing for the nurse.  The ID is passed in when a new patient is
+# created.
+class Patient:
+    def __init__(self, p_id):
+        self.id = p_id
+        self.arrival_time = 0 ##NEW
+        self.q_time_nurse = 0
+```
+
+### Model class
+
+#### The __init__ method
+
+In our __init__ method we will set up our random number generator.
+
+We are also going to create an empty list to store our patient objects - this is so we can track the arrival times.
+
+```{python}
+    def __init__(self, run_number):
+        # Create a SimPy environment in which everything will live
+        self.env = simpy.Environment()
+
+        # Create a patient counter (which we'll use as a patient ID)
+        self.patient_counter = 0
+
+        # Create a SimPy resource to represent a nurse, that will live in the
+        # environment created above.  The number of this resource we have is
+        # specified by the capacity, and we grab this value from our g class.
+        self.nurse = simpy.Resource(self.env, capacity=g.number_of_nurses)
+
+        # Store the passed in run number
+        self.run_number = run_number
+
+        ##NEW
+        # Here we set up our arrivals distribution
+        self.arrivals_dist = NSPPThinning(
+          data=g.arrivals_time_dependent_df,
+          random_seed1 = run_number * 42,
+          random_seed2 = run_number * 88
+        )
+
+        # Create a new Pandas DataFrame that will store some results against
+        # the patient ID (which we'll use as the index).
+        self.results_df = pd.DataFrame()
+        self.results_df["Patient ID"] = [1]
+        self.results_df["Q Time Nurse"] = [0.0]
+        self.results_df["Time with Nurse"] = [0.0]
+        self.results_df.set_index("Patient ID", inplace=True)
+
+        # Create somewhere to store our patient objects
+        self.patient_list = [] ##NEW
+
+        # Create an attribute to store the mean queuing time for the nurse
+        # across this run of the model
+        self.mean_q_time_nurse = 0
+```
+
+#### The generator_patient_arrivals method
+
+In this method, we just need to swap our use of `random.expovariate(1.0 / g.patient_inter)` with using the `sample()` method of the NSPPThinning class.
+
+```{python}
+    def generator_patient_arrivals(self):
+        # We use an infinite loop here to keep doing this indefinitely whilst
+        # the simulation runs
+
+        while True:
+            # Increment the patient counter by 1 (this means our first patient
+            # will have an ID of 1)
+            self.patient_counter += 1
+
+            # Create a new patient - an instance of the Patient Class we
+            # defined above.  Remember, we pass in the ID when creating a
+            # patient - so here we pass the patient counter to use as the ID.
+            p = Patient(self.patient_counter)
+
+            self.patient_list.append(p) ##NEW
+
+            # Tell SimPy to start up the attend_clinic generator function with
+            # this patient (the generator function that will model the
+            # patient's journey through the system)
+            self.env.process(self.attend_clinic(p))
+
+            # Randomly sample the time to the next patient arriving.  Here, we
+            # sample from an exponential distribution (common for inter-arrival
+            # times), and pass in a lambda value of 1 / mean.  The mean
+            # inter-arrival time is stored in the g class.
+            sampled_inter = self.arrivals_dist.sample(simulation_time=self.env.now) ##NEW
+
+            # Freeze this instance of this function in place until the
+            # inter-arrival time we sampled above has elapsed.  Note - time in
+            # SimPy progresses in "Time Units", which can represent anything
+            # you like (just make sure you're consistent within the model)
+            yield self.env.timeout(sampled_inter)
+
+```
+
+#### The attend_clinic and calculate_run_results methods
+
+These methods are unchanged.
+
+#### The run method
+
+For the purposes of checking the model is working as intended, we are going to return the list of patient arrival times after every run.
+
+```{python}
+    def run(self):
+        # Start up our DES entity generators that create new patients.  We've
+        # only got one in this model, but we'd need to do this for each one if
+        # we had multiple generators.
+        self.env.process(self.generator_patient_arrivals())
+
+        # Run the model for the duration specified in g class
+        self.env.run(until=g.sim_duration)
+
+        # Now the simulation run has finished, call the method that calculates
+        # run results
+        self.calculate_run_results()
+
+        ##NEW - return list of arrival times
+        return [p.arrival_time for p in self.patient_list]
+```
+
+### The trial class
+
+#### The __init__ class
+
+We are going to add somewhere to store the arrival times from each run so we can monitor them.
+
+```{python}
+def  __init__(self):
+    self.df_trial_results = pd.DataFrame()
+    self.df_trial_results["Run Number"] = [0]
+    self.df_trial_results["Mean Q Time Nurse"] = [0.0]
+    self.df_trial_results.set_index("Run Number", inplace=True)
+
+    self.arrival_time_lists = [] ##NEW
+```
+
+#### The run_trial method
+
+We are going to modify this to return the arrival times from each run.
+
+```{python}
+def run_trial(self):
+    # Run the simulation for the number of runs specified in g class.
+    # For each run, we create a new instance of the Model class and call its
+    # run method, which sets everything else in motion.  Once the run has
+    # completed, we grab out the stored run results (just mean queuing time
+    # here) and store it against the run number in the trial results
+    # dataframe.
+    for run in range(g.number_of_runs):
+        my_model = Model(run)
+        model_outputs = my_model.run() ##NEW
+        ## Saves output from my_model.run to a variable
+
+        self.df_trial_results.loc[run] = [my_model.mean_q_time_nurse]
+        ##NEW
+        self.arrival_time_lists.append(
+              pf.DataFrame({"run": [run for i in range(len(model_outputs))], "arrival_times": model_outputs})
+              )
+
+    # Once the trial (ie all runs) has completed, print the final results
+    self.print_trial_results()
+
+    ##NEW - return the arrival times as well
+    return self.arrival_time_lists
+```
+
+## The full code
+
+The full updated code for the model is given below.
+
+:::{.callout-note collapse="true"}
+### Click here to view the full code
+
+```{python}
+#| eval: true
+import simpy
+import random
+import pandas as pd
+
+arrivals_df = pd.read_csv("resources/nspp_example_1.csv") ##NEW
+arrivals_df["arrival_rate"] = arrivals_df['mean_iat'].apply(lambda x: 1/x) ##NEW
+
+# Class to store global parameter values.  We don't create an instance of this
+# class - we just refer to the class blueprint itself to access the numbers
+# inside.
+
+class g:
+    arrivals_time_dependent_df = arrivals_df ##NEW
+    mean_n_consult_time = 6
+    number_of_nurses = 1
+    sim_duration = 1440
+    number_of_runs = 100
+
+# Class representing patients coming in to the clinic.  Here, patients have
+# two attributes that they carry with them - their ID, and the amount of time
+# they spent queuing for the nurse.  The ID is passed in when a new patient is
+# created.
+class Patient:
+    def __init__(self, p_id):
+        self.id = p_id
+        self.arrival_time = 0 ##NEW
+        self.q_time_nurse = 0
+
+# Class representing our model of the clinic.
+class Model:
+    # Constructor to set up the model for a run.  We pass in a run number when
+    # we create a new model.
+    def __init__(self, run_number):
+        # Create a SimPy environment in which everything will live
+        self.env = simpy.Environment()
+
+        # Create a patient counter (which we'll use as a patient ID)
+        self.patient_counter = 0
+
+        # Create a SimPy resource to represent a nurse, that will live in the
+        # environment created above.  The number of this resource we have is
+        # specified by the capacity, and we grab this value from our g class.
+        self.nurse = simpy.Resource(self.env, capacity=g.number_of_nurses)
+
+        # Store the passed in run number
+        self.run_number = run_number
+
+        ##NEW
+        # Here we set up our arrivals distribution
+        self.arrivals_dist = NSPPThinning(
+          data=g.arrivals_time_dependent_df,
+          random_seed1 = run_number * 42,
+          random_seed2 = run_number * 88
+        )
+
+
+        # Create a new Pandas DataFrame that will store some results against
+        # the patient ID (which we'll use as the index).
+        self.results_df = pd.DataFrame()
+        self.results_df["Patient ID"] = [1]
+        self.results_df["Q Time Nurse"] = [0.0]
+        self.results_df["Time with Nurse"] = [0.0]
+        self.results_df.set_index("Patient ID", inplace=True)
+
+        # Create somewhere to store our patient objects
+        self.patient_list = [] ##NEW
+
+        # Create an attribute to store the mean queuing time for the nurse
+        # across this run of the model
+        self.mean_q_time_nurse = 0
+
+    # A generator function that represents the DES generator for patient
+    # arrivals
+    def generator_patient_arrivals(self):
+        # We use an infinite loop here to keep doing this indefinitely whilst
+        # the simulation runs
+        while True:
+            # Increment the patient counter by 1 (this means our first patient
+            # will have an ID of 1)
+            self.patient_counter += 1
+
+            # Create a new patient - an instance of the Patient Class we
+            # defined above.  Remember, we pass in the ID when creating a
+            # patient - so here we pass the patient counter to use as the ID.
+            p = Patient(self.patient_counter)
+            p.arrival_time = self.env.now
+
+            self.patient_list.append(p) ##NEW
+
+            # Tell SimPy to start up the attend_clinic generator function with
+            # this patient (the generator function that will model the
+            # patient's journey through the system)
+            self.env.process(self.attend_clinic(p))
+
+            # Randomly sample the time to the next patient arriving.  Here, we
+            # sample from an exponential distribution (common for inter-arrival
+            # times), and pass in a lambda value of 1 / mean.  The mean
+            # inter-arrival time is stored in the g class.
+            sampled_inter = self.arrivals_dist.sample(simulation_time=self.env.now) ##NEW
+
+            # Freeze this instance of this function in place until the
+            # inter-arrival time we sampled above has elapsed.  Note - time in
+            # SimPy progresses in "Time Units", which can represent anything
+            # you like (just make sure you're consistent within the model)
+            yield self.env.timeout(sampled_inter)
+
+    # A generator function that represents the pathway for a patient going
+    # through the clinic.  Here the pathway is extremely simple - a patient
+    # arrives, waits to see a nurse, and then leaves.
+    # The patient object is passed in to the generator function so we can
+    # extract information from / record information to it
+    def attend_clinic(self, patient):
+        # Record the time the patient started queuing for a nurse
+        start_q_nurse = self.env.now
+
+        # This code says request a nurse resource, and do all of the following
+        # block of code with that nurse resource held in place (and therefore
+        # not usable by another patient)
+        with self.nurse.request() as req:
+            # Freeze the function until the request for a nurse can be met.
+            # The patient is currently queuing.
+            yield req
+
+            # When we get to this bit of code, control has been passed back to
+            # the generator function, and therefore the request for a nurse has
+            # been met.  We now have the nurse, and have stopped queuing, so we
+            # can record the current time as the time we finished queuing.
+            end_q_nurse = self.env.now
+
+            # Calculate the time this patient was queuing for the nurse, and
+            # record it in the patient's attribute for this.
+            patient.q_time_nurse = end_q_nurse - start_q_nurse
+
+            # Now we'll randomly sample the time this patient with the nurse.
+            # Here, we use an Exponential distribution for simplicity, but you
+            # would typically use a Log Normal distribution for a real model
+            # (we'll come back to that).  As with sampling the inter-arrival
+            # times, we grab the mean from the g class, and pass in 1 / mean
+            # as the lambda value.
+            sampled_nurse_act_time = random.expovariate(1.0 /
+                                                        g.mean_n_consult_time)
+
+            # Here we'll store the queuing time for the nurse and the sampled
+            # time to spend with the nurse in the results DataFrame against the
+            # ID for this patient.  In real world models, you may not want to
+            # bother storing the sampled activity times - but as this is a
+            # simple model, we'll do it here.
+            # We use a handy property of pandas called .at, which works a bit
+            # like .loc.  .at allows us to access (and therefore change) a
+            # particular cell in our DataFrame by providing the row and column.
+            # Here, we specify the row as the patient ID (the index), and the
+            # column for the value we want to update for that patient.
+            self.results_df.at[patient.id, "Q Time Nurse"] = (
+                patient.q_time_nurse)
+            self.results_df.at[patient.id, "Time with Nurse"] = (
+                sampled_nurse_act_time)
+
+            # Freeze this function in place for the activity time we sampled
+            # above.  This is the patient spending time with the nurse.
+            yield self.env.timeout(sampled_nurse_act_time)
+
+            # When the time above elapses, the generator function will return
+            # here.  As there's nothing more that we've written, the function
+            # will simply end.  This is a sink.  We could choose to add
+            # something here if we wanted to record something - e.g. a counter
+            # for number of patients that left, recording something about the
+            # patients that left at a particular sink etc.
+
+    # This method calculates results over a single run.  Here we just calculate
+    # a mean, but in real world models you'd probably want to calculate more.
+    def calculate_run_results(self):
+        # Take the mean of the queuing times for the nurse across patients in
+        # this run of the model.
+        self.mean_q_time_nurse = self.results_df["Q Time Nurse"].mean()
+
+    # The run method starts up the DES entity generators, runs the simulation,
+    # and in turns calls anything we need to generate results for the run
+    def run(self):
+        # Start up our DES entity generators that create new patients.  We've
+        # only got one in this model, but we'd need to do this for each one if
+        # we had multiple generators.
+        self.env.process(self.generator_patient_arrivals())
+
+        # Run the model for the duration specified in g class
+        self.env.run(until=g.sim_duration)
+
+        # Now the simulation run has finished, call the method that calculates
+        # run results
+        self.calculate_run_results()
+
+        ##NEW - return list of arrival times
+        return [p.arrival_time for p in self.patient_list]
+
+# Class representing a Trial for our simulation - a batch of simulation runs.
+class Trial:
+    # The constructor sets up a pandas dataframe that will store the key
+    # results from each run (just the mean queuing time for the nurse here)
+    # against run number, with run number as the index.
+    def  __init__(self):
+        self.df_trial_results = pd.DataFrame()
+        self.df_trial_results["Run Number"] = [0]
+        self.df_trial_results["Mean Q Time Nurse"] = [0.0]
+        self.df_trial_results.set_index("Run Number", inplace=True)
+
+        self.arrival_time_lists = [] ##NEW
+
+    # Method to print out the results from the trial.  In real world models,
+    # you'd likely save them as well as (or instead of) printing them
+    def print_trial_results(self):
+        print ("Trial Results")
+        print (self.df_trial_results)
+
+    # Method to run a trial
+    def run_trial(self):
+        # Run the simulation for the number of runs specified in g class.
+        # For each run, we create a new instance of the Model class and call its
+        # run method, which sets everything else in motion.  Once the run has
+        # completed, we grab out the stored run results (just mean queuing time
+        # here) and store it against the run number in the trial results
+        # dataframe.
+        for run in range(g.number_of_runs):
+            my_model = Model(run)
+            model_outputs = my_model.run() ##NEW
+            ## Saves output from my_model.run to a variable
+
+            self.df_trial_results.loc[run] = [my_model.mean_q_time_nurse]
+
+            ##NEW
+            self.arrival_time_lists.append(
+              pd.DataFrame({"run": [run for i in range(len(model_outputs))], "arrival_times": model_outputs})
+              )
+
+        # Once the trial (ie all runs) has completed, print the final results
+        self.print_trial_results()
+
+        ##NEW - return the arrival times as well
+        return self.arrival_time_lists
+```
+:::
+
+## Evaluating the outputs
+
+```{python}
+#| eval: true
+# Create an instance of the Trial class
+my_trial = Trial()
+
+# Call the run_trial method of our Trial object
+arrival_times = my_trial.run_trial()
+```
+
+```{python}
+#| eval: true
+
+arrival_times_df = pd.concat(arrival_times)
+
+arrival_times_df['arr_time_bins'] = pd.cut(arrival_times_df['arrival_times'], bins=[i for i in range(0, g.sim_duration+1, 60)], include_lowest=True, right=False)
+
+arrival_times_df.head(10)
+```
+
+```{python}
+#| eval: true
+
+arrival_times_df.tail(10)
+```
+
+Let's count the number of arrivals that have turned up during each 60-minute interval across the hundred runs we have done.
+
+```{python}
+#| eval: true
+#| echo: true
+#| output: false
+#| warning: false
+
+arrival_times_df_grouped = (
+  arrival_times_df
+  .groupby("arr_time_bins")
+  .count()
+  .reset_index()
+)
+
+```
+
+```{python}
+#| eval: true
+#| warning: false
+
+arrival_times_df_grouped['arr_time_bins_str'] = (
+  arrival_times_df_grouped['arr_time_bins'].astype('str')
+)
+
+arrival_times_df_grouped["mean_arrivals_in_period_per_run"] = (
+  arrival_times_df_grouped["arrival_times"] / g.number_of_runs
+)
+
+px.line(
+  arrival_times_df_grouped,
+  x="arr_time_bins_str",
+  y="mean_arrivals_in_period_per_run"
+)
+```
+
+## Modifying this example - varying arrivals across the course of a week
+
+```{python}
+#| eval: true
+
+g.sim_duration = 1440 * 7
+
+arrivals_df_weekly = pd.read_csv("resources/nspp_example_2.csv")
+arrivals_df_weekly["arrival_rate"] = arrivals_df_weekly['mean_iat'].apply(lambda x: 1/x)
+
+g.arrivals_time_dependent_df = arrivals_df_weekly
+```
+
+### Evaluating the outputs
+
+Let's count the number of arrivals that have turned up during each daily interval (1440 minutes) across the hundred runs we have done.
+
+```{python}
+#| eval: true
+#| echo: true
+#| output: false
+#| warning: false
+
+# Create an instance of the Trial class
+my_trial = Trial()
+
+# Call the run_trial method of our Trial object
+arrival_times = my_trial.run_trial()
+
+arrival_times_df = pd.concat(arrival_times)
+
+arrival_times_df['arr_time_bins'] = pd.cut(arrival_times_df['arrival_times'], bins=[i for i in range(0, g.sim_duration+1, 1440)], include_lowest=True, right=False)
+
+arrival_times_df_grouped = (
+  arrival_times_df
+  .groupby("arr_time_bins")
+  .count()
+  .reset_index()
+)
+
+```
+
+```{python}
+#| eval: true
+#| warning: false
+
+arrival_times_df_grouped['arr_time_bins_str'] = (
+  arrival_times_df_grouped['arr_time_bins'].astype('str')
+)
+
+arrival_times_df_grouped["mean_arrivals_in_period_per_run"] = (
+  arrival_times_df_grouped["arrival_times"] / g.number_of_runs
+)
+
+px.line(
+  arrival_times_df_grouped,
+  x="arr_time_bins_str",
+  y="mean_arrivals_in_period_per_run"
+)
+```
+
+If we run this over a period of several weeks, we can see that the pattern repeats - despite going past the duration we specified in our csv. This means we only need to write in one repeat of the pattern.
+
+```{python}
+#| eval: true
+
+g.sim_duration = 1440 * 7 * 5
+
+```
+
+```{python}
+#| eval: true
+#| echo: false
+#| output: true
+#| warning: false
+
+# Create an instance of the Trial class
+my_trial = Trial()
+
+# Call the run_trial method of our Trial object
+arrival_times = my_trial.run_trial()
+
+arrival_times_df = pd.concat(arrival_times)
+
+arrival_times_df['arr_time_bins'] = pd.cut(arrival_times_df['arrival_times'], bins=[i for i in range(0, g.sim_duration+1, 1440)], include_lowest=True, right=False)
+
+arrival_times_df_grouped = (
+  arrival_times_df
+  .groupby("arr_time_bins")
+  .count()
+  .reset_index()
+)
+
+arrival_times_df_grouped['arr_time_bins_str'] = (
+  arrival_times_df_grouped['arr_time_bins'].astype('str')
+)
+
+arrival_times_df_grouped["mean_arrivals_in_period_per_run"] = (
+  arrival_times_df_grouped["arrival_times"] / g.number_of_runs
+)
+
+px.line(
+  arrival_times_df_grouped,
+  x="arr_time_bins_str",
+  y="mean_arrivals_in_period_per_run"
+)
+```

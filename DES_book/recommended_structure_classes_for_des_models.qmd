@@ -1,0 +1,424 @@
+---
+title: "The Recommended Structure for DES Models"
+author:
+  - name: Sammi Rosser
+    orcid: 0000-0002-9552-8988
+    url: https://github.com/Bergam0t
+  - name: Dan Chalk
+    orcid: 0000-0002-4165-4364
+    url: https://github.com/hsma-chief-elf
+execute:
+  eval: false
+jupyter: python3
+---
+
+There are many different ways to structure SimPy models.
+
+You will often find different coders have their own preferred approach!
+
+We’re going to structure our SimPy model in an Object Oriented way.
+
+
+:::{.callout-note}
+There are two main ways of programming in python - **functional** and **object oriented**. These are known as coding **paradigms**.
+
+In functional programming, you write **functions** that are (ideally) designed to do one thing and do it well.
+
+You then use these functions in some sort of sequence to achieve what you're trying to do.
+
+This can make a lot of sense for a lot of data analysis and data science workflows.
+
+In comparison, in object oriented programming (OOP) everything is centred around objects that have their own:
+
+- Attributes (variables that belong to them), and-
+- Methods (which are what functions are called when they belong to objects).
+
+**Objects** are created as **instances** of **classes**.
+
+Classes are essentially generalised blueprints for how certain types of objects should work!
+
+This can be really useful in situations where you have either:
+
+- A lot of logic that makes sense to attach and organise with the thing that uses that logic (like a process)
+- A need to make copies of a very similar thing (like lots of patients to populate a model)
+
+Let’s look at an example.
+
+Let’s say we want to write code that defines how an ambulance works.
+
+There will be properties the ambulance has. Things like:
+
+- The organisation it belongs to.
+- The registration number.
+- Whether a patient is currently on board.
+- Whether the siren is currently going off.
+
+There will also be things the ambulance does:
+
+- Driving.
+- Parking.
+- Having patients loaded into it / out of it.
+- Switching the siren on and off.
+
+In Object Oriented Programming, the things it **has** are known as **attributes** and the things it *does* are *methods*.
+
+:::
+
+
+Specifically, we’re going to have 4 different classes: g, entity, model, and trial.
+
+While object oriented code can feel a bit cumbersome for small models, following the same sort of pattern each time makes it really easy to keep track of what your model is doing. It also makes it a lot easier to expand and modify your model over time.
+
+The other benefit is that you will find other models from people who have done the HSMA course are likely to have a similar structure - so you should find it easier to read, reuse and tweak their models too!
+
+:::{.callout-note}
+Even among people using an object oriented approach, you will find some variations.
+
+Again, there's nothing wrong with that!
+
+Another common pattern you may come across in time is the Scenario, entity, model approach with single_run and multiple_run functions that don't exist inside a class.
+
+Over time, you'll likely find a style used by someone else that you find particularly easy to follow and you want to adopt and adapt.
+
+:::
+
+**g Class**
+
+This is a special class that will store our global level parameters for the model.
+
+Unlike most OOP cases, we won’t create an instance of this class (hence the lower case) - we’ll just refer to the blueprint directly.
+
+**Entity**
+
+This class will represent our entity.
+
+An entity could be a customer, a passenger, etc., but often in our healthcare models, our entities will be patients.
+
+Entities will carry with them information that we can record to and / or read from (e.g. an ID, how long they spent queuing, their condition etc).
+
+If we had more than one entity, we’d need a class for each.
+
+Multiple entities could be different types of patients - e.g. trauma patients and non-trauma patients.
+
+**Model**
+
+This is the big one that represents the system that we are modelling.
+
+This could be a phone helpline, a clinic, an emergency department, an airport terminal, a healthcare clinic that runs appointments - many processes are suitable.
+
+It’ll have our generators, our entity journeys and more, and it’s where our SimPy environment (where everything lives) will be kept.
+
+
+**Trial**
+
+This class will represent a batch of runs of our simulation, and will have methods to run a trial, extract results etc.
+
+## Class breakdown
+
+Let's look at the purpose and recommended structure of each class in a bit more detail.
+
+Here, the example code given relates to a customer support helpline. Customers call a helpline, wait on hold until a customer support agent is ready to speak to them, speak to the agent for a period of time, and then the call ends and the agent connects to the next person who is waiting on hold. If there is no-one on hold at the time, the agent will get a break until someone else arrives!
+
+### g class
+
+The g Class stores our global parameter values for the model so we can easily change aspects of the model to test scenarios.  This includes:
+
+- Values to define inter-arrival time distributions (eg mean, standard deviation etc).
+- Values to define activity time distributions (eg mean, standard deviation etc).
+- Number of each resource.
+- Duration of simulation runs.
+- Number of runs in a trial.
+
+We do not create an instance of g class.  Instead, we refer to it directly when we need to access something in it.
+
+:::{.callout-note}
+#### Example g class
+```{python}
+class g:
+    time_units_between_customer_arrivals = 5
+    mean_customer_service_time = 6
+    number_of_customer_support_agents = 1
+    sim_duration = 1440
+    number_of_runs = 10
+```
+:::
+
+### Entity class
+
+The entity class represents our entity in the model - which, for healthcare models, will often be patients.
+
+We can store attributes here that entities carry with them that we may want to access (think of a person carrying a clipboard with them with information on it).
+
+In a simple model, an entity may just carry their ID and how long they spent queuing for a resource (once known).  But more advanced models could store things like their condition, their priority, probability of going down path x, etc.
+
+:::{.callout-note}
+#### Example entity class
+```{python}
+class Customer:
+    def __init__(self, p_id):
+        self.id = p_id
+        self.queue_time_customer_support_agent = 0
+```
+:::
+
+### Model class
+
+The Model Class represents the system we are modelling - this might be a clinic, for example.  As such, there’s a lot more to unpack here, so let’s take this bit by bit.
+
+First, we’ll look at the constructor for our model.
+
+The constructor will set up:
+
+- A SimPy Environment (basically where everything lives).
+- An entity counter (which we’ll use to give entities - such as patients - a simple ID).
+- The resources we need (for example, our nurses).
+- A DataFrame to store per-entity results in a single run of the model.
+- Attributes to store things like how long the entities queued for each activity.
+
+What the constructor sets up doesn't have to be limited to these things - anything relating to the system as a whole that makes sense to store here could be included.
+
+#### DES generator - arrivals of entities to the system
+
+Within the Model Class we have a **generator function** that will represent our DES generator for entities **arriving into our process**.
+
+Here’s basically how it works:
+
+*KEEP REPEATING THE FOLLOWING FOREVER (until the simulation stops running):*
+
+1. Increment the counter to get ID for next entity.
+2. Create a new entity and give them that ID.
+3. Start up an instance of the generator function for their journey through the process and chuck them in it.
+4. Sample the time until the next entity arrives.
+5. FREEZE this function until that time elapses.
+6. Return to 1.
+
+#### DES Generator - the entity journey
+
+Now, let’s look at the big one.  The other generator function - the one that represents an entity’s journey through the system (this is the one we lobbed the new entities generated by the previous generator).
+
+Here’s how this works:
+
+1. Record time started queuing for first activity.
+2. Request resource for first activity.
+3. Wait until resource is free.
+4. Once resource is free, grab the resource and keep hold of the resource until finished with them.  Record time finished queuing and calculate queue time.
+5. Sample how long will spend in this activity.
+6. FREEZE this instance of the function until that time elapses (freezing the resource with it, so it’s not available to anyone else).
+7. If there’s another activity, do the same again for that one.  If not, end (and therefore entity leaves the model).
+
+#### Running the model
+
+Finally, we need a run method in our Model class.  Basically, the run method will:
+
+- Start up our DES generators (our arrival points) - we only have one here.
+- Tell the simulation to run for the duration specified in g Class.
+- Call the calculate run results method in the previous slide.
+- Print out the run number with the patient-level results from this run.
+
+
+:::{.callout-note}
+#### Full Example model class
+```{python}
+class Model:
+    # Constructor to set up the model for a run.  We pass in a run number when
+    # we create a new model.
+    def __init__(self, run_number):
+        # Create a SimPy environment in which everything will live
+        self.env = simpy.Environment()
+
+        # Create a customer counter (which we'll use as a customer ID)
+        self.customer_counter = 0
+
+        # Create a SimPy resource to represent a customer support agent, that will live in the
+        # environment created above.  The number of this resource we have is
+        # specified by the capacity, and we grab this value from our g class.
+        self.customer_support_agent = simpy.Resource(self.env, capacity=number_of_customer_support_agents)
+
+        # Store the passed in run number
+        self.run_number = run_number
+
+        # Create a new Pandas DataFrame that will store some results against
+        # the customer ID (which we'll use as the index).
+        self.results_df = pd.DataFrame()
+        self.results_df["Customer ID"] = [1]
+        self.results_df["Queue Time"] = [0.0]
+        self.results_df["Time with Customer Support Agent"] = [0.0]
+        self.results_df.set_index("Customer ID", inplace=True)
+
+        # Create an attribute to store the mean queuing time for the support agents
+        # across this run of the model
+        self.mean_queue_time_support_agent = 0
+
+    # A generator function that represents the DES generator for customer
+    # arrivals
+    def generator_customer_arrivals(self):
+        # We use an infinite loop here to keep doing this indefinitely whilst
+        # the simulation runs
+        while True:
+            # Increment the customer counter by 1 (this means our first customer
+            # will have an ID of 1)
+            self.customer_counter += 1
+
+            # Create a new customer - an instance of the customer Class we
+            # defined above.  Remember, we pass in the ID when creating a
+            # customer - so here we pass the customer counter to use as the ID.
+            c = Customer(self.customer_counter)
+
+            # Tell SimPy to start up the use_customer_service_helpline generator function with
+            # this customer (the generator function that will model the
+            # customer's journey through the system)
+            self.env.process(self.use_customer_service_helpline (c))
+
+            # Randomly sample the time to the next customer arriving.  Here, we
+            # sample from an exponential distribution (common for inter-arrival
+            # times), and pass in a lambda value of 1 / mean.  The mean
+            # inter-arrival time is stored in the g class.
+            sampled_inter_arrival_time = random.expovariate(1.0 / g.time_units_between_customer_arrivals)
+
+            # Freeze this instance of this function in place until the
+            # inter-arrival time we sampled above has elapsed.  Note - time in
+            # SimPy progresses in "Time Units", which can represent anything
+            # you like (just make sure you're consistent within the model)
+            yield self.env.timeout(sampled_inter_arrival_time)
+
+    # A generator function that represents the pathway for a customer calling our helpline
+    # Here the pathway is extremely simple - a customer
+    # arrives in the call system, waits to be connected to a customer support agent,
+    # spends a varying amount of time being helped by the agent, and then leaves,
+    # meaning the agent is free to help the next person.
+    # The customer object is passed in to the generator function so we can
+    # extract information from / record information to it
+    def use_customer_service_helpline(self, customer):
+        # Record the time the patient started queuing for a nurse
+        start_q_customer_support_agent = self.env.now
+
+        # This code says request a customer support agent resource, and do all of the following
+        # block of code with that nurse resource held in place (and therefore
+        # not usable by another patient)
+        with self.customer_support_agent.request() as req:
+            # Freeze the function until the request for a customer support agent can be met.
+            # The customer is currently queuing.
+            yield req
+
+            # When we get to this bit of code, control has been passed back to
+            # the generator function, and therefore the request for a customer support agent has
+            # been met.  We now have the customer support agent, and have stopped queuing, so we
+            # can record the current time as the time we finished queuing.
+            end_q_customer_support_agent = self.env.now
+
+            # Calculate the time this patient was queuing for the customer support agent, and
+            # record it in the customer's attribute for this.
+            customer.queue_time_customer_support_agent = end_q_customer_support_agent - start_q_customer_support_agent
+
+            # Now we'll randomly sample the time this customer with the customer support agent.
+            # Here, we use an Exponential distribution for simplicity, but you
+            # would typically use a Log Normal distribution for a real model
+            # (we'll come back to that).  As with sampling the inter-arrival
+            # times, we grab the mean from the g class, and pass in 1 / mean
+            # as the lambda value.
+            sampled_customer_support_agent_activity_time = random.expovariate(1.0 /
+                                                        g.mean_customer_service_time)
+
+            # Here we'll store the queuing time for the customer support agent and the sampled
+            # time to spend with the nurse in the results DataFrame against the
+            # ID for this customer.
+            #
+            # In real world models, you may not want to
+            # bother storing the sampled activity times - but as this is a
+            # simple model, we'll do it here.
+            #
+            # We use a handy property of pandas called .at, which works a bit
+            # like .loc.  .at allows us to access (and therefore change) a
+            # particular cell in our DataFrame by providing the row and column.
+            # Here, we specify the row as the patient ID (the index), and the
+            # column for the value we want to update for that patient.
+            self.results_df.at[customer.id, "Queue Time"] = (
+                customer.queue_time_customer_support_agent)
+            self.results_df.at[customer.id, "Time with Customer Support Agent"] = (
+                sampled_customer_support_agent_activity_time)
+
+            # Freeze this function in place for the activity time we sampled
+            # above.  This is the patient spending time with the customer support
+            # agent.
+            yield self.env.timeout(sampled_customer_support_agent_activity_time)
+
+            # When the time above elapses, the generator function will return
+            # here.  As there's nothing more that we've written, the function
+            # will simply end.  This is a sink.  We could choose to add
+            # something here if we wanted to record something - e.g. a counter
+            # for number of patients that left, recording something about the
+            # patients that left at a particular sink etc.
+
+    # This method calculates results over a single run.  Here we just calculate
+    # a mean, but in real world models you'd probably want to calculate more.
+    def calculate_run_results(self):
+        # Take the mean of the queuing times for the nurse across patients in
+        # this run of the model.
+        self.mean_queue_time_support_agent = self.results_df["Time with Customer Support Agent"].mean()
+
+    # The run method starts up the DES entity generators, runs the simulation,
+    # and in turns calls anything we need to generate results for the run
+    def run(self):
+        # Start up our DES entity generators that create new customers.  We've
+        # only got one in this model, but we'd need to do this for each one if
+        # we had multiple generators.
+        self.env.process(self.generator_customer_arrivals())
+
+        # Run the model for the duration specified in g class
+        self.env.run(until=g.sim_duration)
+
+        # Now the simulation run has finished, call the method that calculates
+        # run results
+        self.calculate_run_results()
+
+        # Print the run number with the customer-level results from this run of
+        # the model
+        print (f"Run Number {self.run_number}")
+        print (self.results_df)
+
+```
+:::
+
+### Trial class
+
+Our final class is the Trial class.  This represents a batch of simulation runs, and will contain methods to run a batch of runs, as well as store, record and display results from the trial.
+
+:::{.callout-note}
+#### Example trial class
+```{python}
+class Trial:
+    # The constructor sets up a pandas dataframe that will store the key
+    # results from each run (just the mean queuing time for the nurse here)
+    # against run number, with run number as the index.
+    def  __init__(self):
+        self.df_trial_results = pd.DataFrame()
+        self.df_trial_results["Run Number"] = [0]
+        self.df_trial_results["Mean Queue Time Customer Supoprt Agent"] = [0.0]
+        self.df_trial_results.set_index("Run Number", inplace=True)
+
+    # Method to print out the results from the trial.  In real world models,
+    # you'd likely save them as well as (or instead of) printing them
+    def print_trial_results(self):
+        print ("Trial Results")
+        print (self.df_trial_results)
+
+    # Method to run a trial
+    def run_trial(self):
+        # Run the simulation for the number of runs specified in g class.
+        # For each run, we create a new instance of the Model class and call its
+        # run method, which sets everything else in motion.  Once the run has
+        # completed, we grab out the stored run results (just mean queuing time
+        # here) and store it against the run number in the trial results
+        # dataframe.
+        for run in range(g.number_of_runs):
+            my_model = Model(run)
+            my_model.run()
+
+            self.df_trial_results.loc[run] = [my_model.mean_queue_time_support_agent]
+
+        # Once the trial (ie all runs) has completed, print the final results
+        self.print_trial_results()
+```
+:::
+
+We can, of course, then take the means over the runs in the trial to get the average predicted queuing time etc. - and we should probably do that in a separate method in the Trial class.

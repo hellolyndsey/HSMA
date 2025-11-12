@@ -1,0 +1,11 @@
+/*-- scss:defaults --*/
+//https://quarto.org/docs/output-formats/html-themes.html
+// Base document colors
+
+// Code blocks
+$code-block-bg-alpha: -.8;
+
+// Prevent cut-off of final chapters in sidebar
+.sidebar-menu-container {
+    padding-bottom: 10em;
+}
